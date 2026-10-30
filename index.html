@@ -40,19 +40,33 @@
 <body>
 
 <h1>ArcGIS Layer Finder</h1>
-<p class="sub">Colle l'URL d'une application ArcGIS (Instant Apps, StoryMaps, Dashboards, webmap...) ou directement un ID d'item : l'outil remonte la config, trouve la webmap associée et liste les services (MapServer / FeatureServer / ...) exploitables dans QGIS.</p>
+<p class="sub">Colle l'URL d'une application ArcGIS (Instant Apps, StoryMaps, Dashboards, webmap...), d'une carte Ma Carte IGN (macarte.ign.fr), ou directement un ID d'item ArcGIS : l'outil remonte la config et liste les services (MapServer / FeatureServer / WMS / WMTS / ...) exploitables dans QGIS. Pour toute autre URL, l'outil tente une récupération directe de la page (ça marche si le site autorise le CORS, sinon colle son code source ci-dessous).</p>
 
 <div class="row">
-  <input id="input" placeholder="https://xxx.maps.arcgis.com/apps/instant/media/index.html?appid=... (ou juste l'id)">
+  <input id="input" placeholder="https://xxx.maps.arcgis.com/apps/instant/media/index.html?appid=... ou https://macarte.ign.fr/carte/xxx/... (ou juste l'id ArcGIS)">
   <button id="go">Analyser</button>
 </div>
 <div id="status"></div>
 <div id="results"></div>
 
+<h1 style="margin-top:2.5rem">Autres geoserveurs (WMS / WFS / WMTS / GeoServer / QGIS Server...)</h1>
+<p class="sub">Pour un site qui n'est pas une app ArcGIS Online : colle le code source (Ctrl+U) ou un bundle JS de la page. Aucune requête réseau n'est faite, juste une extraction d'URLs par motif.</p>
+<textarea id="rawInput" rows="6" style="width:100%;background:var(--panel);border:1px solid var(--border);color:var(--text);padding:.6rem .8rem;border-radius:6px;font-size:.85rem;font-family:var(--mono)" placeholder="Colle ici le HTML / JS de la page..."></textarea>
+<div class="row" style="margin-top:.5rem"><button id="goText">Scanner le texte</button></div>
+<div id="statusText"></div>
+<div id="resultsText"></div>
+
 <script>
 const ID_RE = /[0-9a-f]{32}/i;
 const SERVICE_RE = /^https?:\/\/.+\/(MapServer|FeatureServer|ImageServer|SceneServer|VectorTileServer|GeocodeServer)(\/\d+)?\/?$/i;
+const OGC_PATH_RE = /^https?:\/\/[^\s"'<>]+\/(geoserver|qgisserver|ows|wms|wfs|wmts|wcs)(\/[^\s"'<>]*)?(\?[^\s"'<>]*)?$/i;
+const MAPSERV_CGI_RE = /^https?:\/\/[^\s"'<>]+\/[^\s"'<>\/?]*mapserv[^\s"'<>\/?]*(\.(fcgi|cgi))?(\?[^\s"'<>]*)?$/i;
+const OGC_QUERY_RE = /^https?:\/\/[^\s"'<>]+[?&]service=(wms|wfs|wmts|wcs)\b/i;
 const REF_KEYS = ['webmap','webscene','itemId','mapId'];
+
+function isServiceUrl(s){
+  return SERVICE_RE.test(s) || OGC_PATH_RE.test(s) || MAPSERV_CGI_RE.test(s) || OGC_QUERY_RE.test(s);
+}
 
 const statusEl = document.getElementById('status');
 const resultsEl = document.getElementById('results');
@@ -78,11 +92,16 @@ async function getItemData(id){
   return fetchJSON(`https://www.arcgis.com/sharing/rest/content/items/${id}/data?f=json`);
 }
 
+function extractMacarteId(input){
+  const m = input.trim().match(/macarte\.ign\.fr\/carte\/([^\/\s?]+)/i);
+  return m ? m[1] : null;
+}
+
 // walk the data JSON, collecting service urls and referenced item ids (webmap/webscene/...)
 function walk(node, found, refs){
   if(node == null) return;
   if(typeof node === 'string'){
-    if(SERVICE_RE.test(node)) found.add(node);
+    if(isServiceUrl(node)) found.add(node);
     return;
   }
   if(Array.isArray(node)){
@@ -102,7 +121,7 @@ function walk(node, found, refs){
 async function describeService(url){
   try{
     const info = await fetchJSON(url.replace(/\/$/,'') + '?f=json');
-    const layers = (info.layers || info.subLayers || []).map(l => l.name).filter(Boolean);
+    const layers = [...(info.layers || []), ...(info.tables || [])].map(l => l.name).filter(Boolean);
     return {
       serviceDescription: info.serviceDescription || info.description || '',
       layers
@@ -127,7 +146,7 @@ function card(title, metaLines, extraHtml){
   return div;
 }
 
-async function analyze(rootId, depth, seenItems, found, visited){
+async function analyze(rootId, depth, seenItems, found){
   if(depth > 3 || seenItems.has(rootId)) return;
   seenItems.add(rootId);
 
@@ -152,21 +171,101 @@ async function analyze(rootId, depth, seenItems, found, visited){
   walk(data, found, refs);
 
   for(const refId of refs){
-    if(refId !== rootId) await analyze(refId, depth+1, seenItems, found, visited);
+    if(refId !== rootId) await analyze(refId, depth+1, seenItems, found);
   }
+}
+
+async function analyzeMacarte(id, found){
+  let meta = null;
+  try{ meta = await fetchJSON(`https://macarte.ign.fr/api/maps/${id}`); }catch(e){}
+
+  let file;
+  try{ file = await fetchJSON(`https://macarte.ign.fr/api/maps/${id}/file`); }
+  catch(e){ resultsEl.appendChild(card(`Ma Carte IGN ${id}`, [`<span class="err">Erreur: ${e.message}</span>`])); return; }
+
+  resultsEl.appendChild(card(
+    `${(meta && meta.title) || '(sans titre)'} <span class="tag">Ma Carte IGN</span>`,
+    [
+      `id: <code>${id}</code>`,
+      meta && meta.author ? `auteur : ${meta.author}` : '',
+      meta && meta.theme ? `thème : ${meta.theme}` : '',
+      meta && meta.description ? meta.description : ''
+    ].filter(Boolean)
+  ));
+
+  const refs = new Set();
+  walk(file, found, refs); // récupère les URLs de services WMS/WFS/... déjà présentes dans la config
+
+  // les fonds de carte IGN natifs ("Geoportail") sont référencés par un code de couche, pas une URL
+  const geoportailLayers = [...new Set((file.layers || [])
+    .filter(l => l.type === 'Geoportail' && l.layer)
+    .map(l => l.layer))];
+  if(geoportailLayers.length){
+    found.add('https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetCapabilities&VERSION=1.0.0');
+    resultsEl.appendChild(card('Couches Géoplateforme IGN utilisées (via data.geopf.fr/wmts)', [geoportailLayers.join(', ')]));
+  }
+}
+
+async function analyzeDirectFetch(url, found){
+  let text;
+  try{
+    const res = await fetch(url);
+    text = await res.text();
+  }catch(e){
+    throw new Error("Impossible de récupérer cette page directement (CORS ou réseau). Colle son code source (Ctrl+U) dans le champ \"Autres geoserveurs\" ci-dessous.");
+  }
+  scanTextForServices(text).forEach(u => found.add(u));
+  resultsEl.appendChild(card(url, ['<span class="tag">page récupérée directement</span>']));
+}
+
+function renderServiceTable(found, container){
+  const copyAllBtn = document.createElement('button');
+  copyAllBtn.className = 'copybtn'; copyAllBtn.textContent = 'Copier tout';
+  copyAllBtn.style.marginBottom = '.6rem';
+  copyAllBtn.onclick = () => navigator.clipboard.writeText([...found].join('\n'));
+  container.appendChild(copyAllBtn);
+
+  const table = document.createElement('table');
+  table.innerHTML = `<thead><tr><th>Service</th><th>Détails</th><th></th></tr></thead>`;
+  const tbody = document.createElement('tbody');
+  for(const url of found){
+    const tr = document.createElement('tr');
+    const tdUrl = document.createElement('td');
+    tdUrl.innerHTML = `<a class="url" href="${url}?f=json" target="_blank">${url}</a>`;
+    const tdInfo = document.createElement('td');
+    tdInfo.textContent = 'chargement...';
+    const tdCopy = document.createElement('td');
+    const btn = document.createElement('button');
+    btn.className = 'copybtn'; btn.textContent = 'Copier';
+    btn.onclick = () => navigator.clipboard.writeText(url);
+    tdCopy.appendChild(btn);
+    tr.append(tdUrl, tdInfo, tdCopy);
+    tbody.appendChild(tr);
+
+    describeService(url).then(d => {
+      if(!d){ tdInfo.innerHTML = '<span class="tag">non consultable (CORS/privé/non-Esri)</span>'; return; }
+      tdInfo.innerHTML = (d.layers.length ? `${d.layers.length} couche(s): ${d.layers.slice(0,6).join(', ')}${d.layers.length>6?'…':''}` : (d.serviceDescription || '—'));
+    });
+  }
+  table.appendChild(tbody);
+  container.appendChild(table);
 }
 
 async function run(){
   const raw = document.getElementById('input').value;
-  const id = extractAppId(raw);
   resultsEl.innerHTML = '';
-  if(!id){ setStatus('Impossible de trouver un ID ArcGIS (32 caractères hex) dans ce que tu as collé.', true); return; }
+  const macarteId = extractMacarteId(raw);
+  const arcgisId = macarteId ? null : extractAppId(raw);
+  const directUrl = (!macarteId && !arcgisId && /^https?:\/\//i.test(raw.trim())) ? raw.trim() : null;
+  if(!macarteId && !arcgisId && !directUrl){ setStatus("Impossible de reconnaître une app ArcGIS, Ma Carte IGN, ou une URL valide dans ce que tu as collé.", true); return; }
 
   goBtn.disabled = true;
   setStatus('Analyse en cours...');
   const found = new Set();
   try{
-    await analyze(id, 0, new Set(), found, new Set());
+    if(macarteId) await analyzeMacarte(macarteId, found);
+    else if(arcgisId) await analyze(arcgisId, 0, new Set(), found);
+    else await analyzeDirectFetch(directUrl, found);
   }catch(e){
     setStatus('Erreur: ' + e.message, true);
     goBtn.disabled = false;
@@ -174,39 +273,43 @@ async function run(){
   }
 
   if(found.size === 0){
-    setStatus('Aucun service MapServer/FeatureServer trouvé dans la config de cet item.', true);
+    setStatus('Aucun service trouvé dans la config de cet item.', true);
   } else {
     setStatus(`${found.size} service(s) trouvé(s).`);
-    const table = document.createElement('table');
-    table.innerHTML = `<thead><tr><th>Service</th><th>Détails</th><th></th></tr></thead>`;
-    const tbody = document.createElement('tbody');
-    for(const url of found){
-      const tr = document.createElement('tr');
-      const tdUrl = document.createElement('td');
-      tdUrl.innerHTML = `<a class="url" href="${url}?f=json" target="_blank">${url}</a>`;
-      const tdInfo = document.createElement('td');
-      tdInfo.textContent = 'chargement...';
-      const tdCopy = document.createElement('td');
-      const btn = document.createElement('button');
-      btn.className = 'copybtn'; btn.textContent = 'Copier';
-      btn.onclick = () => navigator.clipboard.writeText(url);
-      tdCopy.appendChild(btn);
-      tr.append(tdUrl, tdInfo, tdCopy);
-      tbody.appendChild(tr);
-
-      describeService(url).then(d => {
-        if(!d){ tdInfo.innerHTML = '<span class="tag">non consultable (CORS/privé)</span>'; return; }
-        tdInfo.innerHTML = (d.layers.length ? `${d.layers.length} couche(s): ${d.layers.slice(0,6).join(', ')}${d.layers.length>6?'…':''}` : (d.serviceDescription || '—'));
-      });
-    }
-    table.appendChild(tbody);
-    resultsEl.appendChild(table);
+    renderServiceTable(found, resultsEl);
   }
   goBtn.disabled = false;
 }
 
+function scanTextForServices(text){
+  const found = new Set();
+  const matches = text.match(/https?:\/\/[^\s"'<>\\]+/g) || [];
+  for(const raw of matches){
+    const url = raw.replace(/[.,;)\]]+$/,'');
+    if(isServiceUrl(url)) found.add(url);
+  }
+  return found;
+}
+
+function runText(){
+  const text = document.getElementById('rawInput').value;
+  const statusTextEl = document.getElementById('statusText');
+  const resultsTextEl = document.getElementById('resultsText');
+  resultsTextEl.innerHTML = '';
+  const found = scanTextForServices(text);
+  if(found.size === 0){
+    statusTextEl.textContent = 'Aucun service WMS/WFS/WMTS/GeoServer/Esri trouvé dans ce texte.';
+    statusTextEl.className = 'err';
+  } else {
+    statusTextEl.textContent = `${found.size} service(s) trouvé(s).`;
+    statusTextEl.className = '';
+    renderServiceTable(found, resultsTextEl);
+  }
+}
+
 goBtn.addEventListener('click', run);
 document.getElementById('input').addEventListener('keydown', e => { if(e.key === 'Enter') run(); });
+document.getElementById('goText').addEventListener('click', runText);
 </script>
 </body>
 </html>
