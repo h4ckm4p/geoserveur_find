@@ -58,14 +58,20 @@
 
 <script>
 const ID_RE = /[0-9a-f]{32}/i;
-const SERVICE_RE = /^https?:\/\/.+\/(MapServer|FeatureServer|ImageServer|SceneServer|VectorTileServer|GeocodeServer)(\/\d+)?\/?$/i;
+const SERVICE_RE = /^https?:\/\/.+\/(MapServer|FeatureServer|ImageServer|SceneServer|VectorTileServer|GeocodeServer)(\/[A-Za-z0-9_]+)?\/?$/i;
 const OGC_PATH_RE = /^https?:\/\/[^\s"'<>]+\/(geoserver|qgisserver|ows|wms|wfs|wmts|wcs)(\/[^\s"'<>]*)?(\?[^\s"'<>]*)?$/i;
 const MAPSERV_CGI_RE = /^https?:\/\/[^\s"'<>]+\/[^\s"'<>\/?]*mapserv[^\s"'<>\/?]*(\.(fcgi|cgi))?(\?[^\s"'<>]*)?$/i;
 const OGC_QUERY_RE = /^https?:\/\/[^\s"'<>]+[?&]service=(wms|wfs|wmts|wcs)\b/i;
+// même chose mais sans schéma/domaine, pour les configs qui référencent le service en chemin relatif (même origine)
+const SERVICE_PATH_RE = /^\/(?:[^\s"'<>]*\/)?(MapServer|FeatureServer|ImageServer|SceneServer|VectorTileServer|GeocodeServer)(\/[A-Za-z0-9_]+)?\/?(\?[^\s"'<>]*)?$/i;
+const OGC_RELPATH_RE = /^\/(?:[^\s"'<>]*\/)?(geoserver|qgisserver|ows|wms|wfs|wmts|wcs)(\/[^\s"'<>]*)?(\?[^\s"'<>]*)?$/i;
 const REF_KEYS = ['webmap','webscene','itemId','mapId'];
 
 function isServiceUrl(s){
   return SERVICE_RE.test(s) || OGC_PATH_RE.test(s) || MAPSERV_CGI_RE.test(s) || OGC_QUERY_RE.test(s);
+}
+function isServicePath(s){
+  return SERVICE_PATH_RE.test(s) || OGC_RELPATH_RE.test(s);
 }
 
 const statusEl = document.getElementById('status');
@@ -101,7 +107,7 @@ function extractMacarteId(input){
 function walk(node, found, refs){
   if(node == null) return;
   if(typeof node === 'string'){
-    if(isServiceUrl(node)) found.add(node);
+    if(isServiceUrl(node) || isServicePath(node)) found.add(node);
     return;
   }
   if(Array.isArray(node)){
@@ -214,7 +220,10 @@ async function analyzeDirectFetch(url, found){
   }catch(e){
     throw new Error("Impossible de récupérer cette page directement (CORS ou réseau). Colle son code source (Ctrl+U) dans le champ \"Autres geoserveurs\" ci-dessous.");
   }
-  scanTextForServices(text).forEach(u => found.add(u));
+  // l'origine de la page est connue ici, donc les chemins relatifs ("/arcgis/rest/services/...") peuvent être résolus en URL absolues
+  for(const u of scanTextForServices(text)){
+    found.add(u.startsWith('/') ? new URL(u, url).href : u);
+  }
   resultsEl.appendChild(card(url, ['<span class="tag">page récupérée directement</span>']));
 }
 
@@ -231,21 +240,27 @@ function renderServiceTable(found, container){
   for(const url of found){
     const tr = document.createElement('tr');
     const tdUrl = document.createElement('td');
-    tdUrl.innerHTML = `<a class="url" href="${url}?f=json" target="_blank">${url}</a>`;
     const tdInfo = document.createElement('td');
-    tdInfo.textContent = 'chargement...';
     const tdCopy = document.createElement('td');
     const btn = document.createElement('button');
     btn.className = 'copybtn'; btn.textContent = 'Copier';
     btn.onclick = () => navigator.clipboard.writeText(url);
     tdCopy.appendChild(btn);
+
+    if(url.startsWith('/')){
+      tdUrl.innerHTML = `<code>${url}</code>`;
+      tdInfo.innerHTML = '<span class="tag">chemin relatif — à préfixer avec le domaine de l\'app/API</span>';
+    } else {
+      tdUrl.innerHTML = `<a class="url" href="${url}?f=json" target="_blank">${url}</a>`;
+      tdInfo.textContent = 'chargement...';
+      describeService(url).then(d => {
+        if(!d){ tdInfo.innerHTML = '<span class="tag">non consultable (CORS/privé/non-Esri)</span>'; return; }
+        tdInfo.innerHTML = (d.layers.length ? `${d.layers.length} couche(s): ${d.layers.slice(0,6).join(', ')}${d.layers.length>6?'…':''}` : (d.serviceDescription || '—'));
+      });
+    }
+
     tr.append(tdUrl, tdInfo, tdCopy);
     tbody.appendChild(tr);
-
-    describeService(url).then(d => {
-      if(!d){ tdInfo.innerHTML = '<span class="tag">non consultable (CORS/privé/non-Esri)</span>'; return; }
-      tdInfo.innerHTML = (d.layers.length ? `${d.layers.length} couche(s): ${d.layers.slice(0,6).join(', ')}${d.layers.length>6?'…':''}` : (d.serviceDescription || '—'));
-    });
   }
   table.appendChild(tbody);
   container.appendChild(table);
@@ -287,6 +302,12 @@ function scanTextForServices(text){
   for(const raw of matches){
     const url = raw.replace(/[.,;)\]]+$/,'');
     if(isServiceUrl(url)) found.add(url);
+  }
+  // chemins relatifs entre guillemets, ex: "geocodeService": "/arcgis/rest/services/.../GeocodeServer"
+  const quoted = text.match(/["'](\/[^"'\s<>]{3,})["']/g) || [];
+  for(const raw of quoted){
+    const path = raw.slice(1, -1);
+    if(isServicePath(path)) found.add(path);
   }
   return found;
 }

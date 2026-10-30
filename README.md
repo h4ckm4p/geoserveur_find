@@ -16,6 +16,7 @@ Remonte les endpoints de geoserveur (ArcGIS REST, WMS, WFS, WMTS, WCS...) exploi
 
 - **Esri REST** : MapServer, FeatureServer, ImageServer, SceneServer, VectorTileServer, GeocodeServer
 - **OGC** : WMS, WFS, WMTS, WCS — via un chemin explicite (`/wms`, `/geoserver/...`, `/ows`...), via `?service=WMS|WFS|WMTS|WCS` en query string, ou via un endpoint CGI/FastCGI type `mapserv.fcgi`/`qgis_mapserv.fcgi`
+- **Chemins relatifs** : une config qui référence son service par un chemin sans domaine (ex. `"geocodeService": "/arcgis/rest/services/.../GeocodeServer"`, fréquent quand l'app et son ArcGIS Server/GeoServer partagent la même origine) est aussi détectée, en mode texte brut comme en mode ArcGIS/Ma Carte IGN. En mode fetch direct, ces chemins sont automatiquement résolus en URL absolue puisque l'origine de la page est connue ; en mode texte brut, l'origine n'est pas connue donc le chemin est affiché tel quel avec une note "à préfixer avec le domaine de l'app/API"
 
 ## Usage
 
