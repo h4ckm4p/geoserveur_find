@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>ArcGIS Layer Finder</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --bg:#0b0f14; --panel:#121820; --border:#263241; --text:#e6edf3;
+    --muted:#8b98a5; --accent:#4fa3ff; --mono:"SF Mono",Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif;
+    margin:0;padding:2rem;max-width:960px;margin-inline:auto}
+  h1{font-size:1.3rem;margin:0 0 .3rem}
+  p.sub{color:var(--muted);margin:0 0 1.5rem;font-size:.9rem}
+  .row{display:flex;gap:.5rem}
+  input{flex:1;background:var(--panel);border:1px solid var(--border);color:var(--text);
+    padding:.6rem .8rem;border-radius:6px;font-size:.95rem}
+  button{background:var(--accent);color:#06121f;border:none;padding:.6rem 1.1rem;
+    border-radius:6px;font-weight:600;cursor:pointer;font-size:.95rem}
+  button:disabled{opacity:.5;cursor:default}
+  #status{color:var(--muted);font-size:.85rem;margin-top:.6rem;min-height:1.2em}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:8px;
+    padding:1rem 1.2rem;margin-top:1.2rem}
+  .card h2{font-size:1rem;margin:0 0 .4rem}
+  .card .meta{color:var(--muted);font-size:.82rem;line-height:1.5}
+  table{width:100%;border-collapse:collapse;margin-top:1rem;font-size:.85rem}
+  th,td{text-align:left;padding:.5rem .4rem;border-bottom:1px solid var(--border);vertical-align:top}
+  th{color:var(--muted);font-weight:500}
+  code,.url{font-family:var(--mono);font-size:.82rem;word-break:break-all;color:var(--accent)}
+  .tag{display:inline-block;background:#1b2430;border:1px solid var(--border);
+    border-radius:4px;padding:.1rem .4rem;font-size:.72rem;color:var(--muted)}
+  .copybtn{background:transparent;border:1px solid var(--border);color:var(--muted);
+    padding:.2rem .5rem;font-size:.75rem;border-radius:4px}
+  .err{color:#ff6b6b;font-size:.85rem}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+
+<h1>ArcGIS Layer Finder</h1>
+<p class="sub">Colle l'URL d'une application ArcGIS (Instant Apps, StoryMaps, Dashboards, webmap...) ou directement un ID d'item : l'outil remonte la config, trouve la webmap associée et liste les services (MapServer / FeatureServer / ...) exploitables dans QGIS.</p>
+
+<div class="row">
+  <input id="input" placeholder="https://xxx.maps.arcgis.com/apps/instant/media/index.html?appid=... (ou juste l'id)">
+  <button id="go">Analyser</button>
+</div>
+<div id="status"></div>
+<div id="results"></div>
+
+<script>
+const ID_RE = /[0-9a-f]{32}/i;
+const SERVICE_RE = /^https?:\/\/.+\/(MapServer|FeatureServer|ImageServer|SceneServer|VectorTileServer|GeocodeServer)(\/\d+)?\/?$/i;
+const REF_KEYS = ['webmap','webscene','itemId','mapId'];
+
+const statusEl = document.getElementById('status');
+const resultsEl = document.getElementById('results');
+const goBtn = document.getElementById('go');
+
+function setStatus(msg, isErr){
+  statusEl.textContent = msg || '';
+  statusEl.className = isErr ? 'err' : '';
+}
+
+async function fetchJSON(url){
+  const res = await fetch(url);
+  const json = await res.json();
+  if(json.error) throw new Error(json.error.message || JSON.stringify(json.error));
+  return json;
+}
+
+async function getItemInfo(id){
+  // sharing REST is shared across orgs for public items, www.arcgis.com works regardless of tenant
+  return fetchJSON(`https://www.arcgis.com/sharing/rest/content/items/${id}?f=json`);
+}
+async function getItemData(id){
+  return fetchJSON(`https://www.arcgis.com/sharing/rest/content/items/${id}/data?f=json`);
+}
+
+// walk the data JSON, collecting service urls and referenced item ids (webmap/webscene/...)
+function walk(node, found, refs){
+  if(node == null) return;
+  if(typeof node === 'string'){
+    if(SERVICE_RE.test(node)) found.add(node);
+    return;
+  }
+  if(Array.isArray(node)){
+    node.forEach(v => walk(v, found, refs));
+    return;
+  }
+  if(typeof node === 'object'){
+    for(const [k,v] of Object.entries(node)){
+      if(REF_KEYS.includes(k) && typeof v === 'string' && ID_RE.test(v)){
+        refs.add(v);
+      }
+      walk(v, found, refs);
+    }
+  }
+}
+
+async function describeService(url){
+  try{
+    const info = await fetchJSON(url.replace(/\/$/,'') + '?f=json');
+    const layers = (info.layers || info.subLayers || []).map(l => l.name).filter(Boolean);
+    return {
+      serviceDescription: info.serviceDescription || info.description || '',
+      layers
+    };
+  }catch(e){
+    return null; // CORS bloqué ou service protégé — on affiche juste l'URL brute
+  }
+}
+
+function extractAppId(input){
+  const trimmed = input.trim();
+  if(ID_RE.test(trimmed) && trimmed.length === 32) return trimmed;
+  const m = trimmed.match(/appid=([0-9a-f]{32})/i) || trimmed.match(/items\/([0-9a-f]{32})/i) || trimmed.match(ID_RE);
+  if(m) return m[1] || m[0];
+  return null;
+}
+
+function card(title, metaLines, extraHtml){
+  const div = document.createElement('div');
+  div.className = 'card';
+  div.innerHTML = `<h2>${title}</h2><div class="meta">${metaLines.join('<br>')}</div>${extraHtml||''}`;
+  return div;
+}
+
+async function analyze(rootId, depth, seenItems, found, visited){
+  if(depth > 3 || seenItems.has(rootId)) return;
+  seenItems.add(rootId);
+
+  let info, data;
+  try{ info = await getItemInfo(rootId); }
+  catch(e){ resultsEl.appendChild(card(`Item ${rootId}`, [`<span class="err">Erreur: ${e.message}</span>`])); return; }
+
+  resultsEl.appendChild(card(
+    `${info.title || '(sans titre)'} <span class="tag">${info.type||'?'}</span>`,
+    [
+      `id: <code>${rootId}</code>`,
+      info.owner ? `propriétaire : ${info.owner}` : '',
+      info.modified ? `modifié : ${new Date(info.modified).toLocaleDateString()}` : '',
+      info.snippet ? info.snippet : ''
+    ].filter(Boolean)
+  ));
+
+  try{ data = await getItemData(rootId); }
+  catch(e){ resultsEl.appendChild(card('', [`<span class="err">Pas de config JSON (data) lisible: ${e.message}</span>`])); return; }
+
+  const refs = new Set();
+  walk(data, found, refs);
+
+  for(const refId of refs){
+    if(refId !== rootId) await analyze(refId, depth+1, seenItems, found, visited);
+  }
+}
+
+async function run(){
+  const raw = document.getElementById('input').value;
+  const id = extractAppId(raw);
+  resultsEl.innerHTML = '';
+  if(!id){ setStatus('Impossible de trouver un ID ArcGIS (32 caractères hex) dans ce que tu as collé.', true); return; }
+
+  goBtn.disabled = true;
+  setStatus('Analyse en cours...');
+  const found = new Set();
+  try{
+    await analyze(id, 0, new Set(), found, new Set());
+  }catch(e){
+    setStatus('Erreur: ' + e.message, true);
+    goBtn.disabled = false;
+    return;
+  }
+
+  if(found.size === 0){
+    setStatus('Aucun service MapServer/FeatureServer trouvé dans la config de cet item.', true);
+  } else {
+    setStatus(`${found.size} service(s) trouvé(s).`);
+    const table = document.createElement('table');
+    table.innerHTML = `<thead><tr><th>Service</th><th>Détails</th><th></th></tr></thead>`;
+    const tbody = document.createElement('tbody');
+    for(const url of found){
+      const tr = document.createElement('tr');
+      const tdUrl = document.createElement('td');
+      tdUrl.innerHTML = `<a class="url" href="${url}?f=json" target="_blank">${url}</a>`;
+      const tdInfo = document.createElement('td');
+      tdInfo.textContent = 'chargement...';
+      const tdCopy = document.createElement('td');
+      const btn = document.createElement('button');
+      btn.className = 'copybtn'; btn.textContent = 'Copier';
+      btn.onclick = () => navigator.clipboard.writeText(url);
+      tdCopy.appendChild(btn);
+      tr.append(tdUrl, tdInfo, tdCopy);
+      tbody.appendChild(tr);
+
+      describeService(url).then(d => {
+        if(!d){ tdInfo.innerHTML = '<span class="tag">non consultable (CORS/privé)</span>'; return; }
+        tdInfo.innerHTML = (d.layers.length ? `${d.layers.length} couche(s): ${d.layers.slice(0,6).join(', ')}${d.layers.length>6?'…':''}` : (d.serviceDescription || '—'));
+      });
+    }
+    table.appendChild(tbody);
+    resultsEl.appendChild(table);
+  }
+  goBtn.disabled = false;
+}
+
+goBtn.addEventListener('click', run);
+document.getElementById('input').addEventListener('keydown', e => { if(e.key === 'Enter') run(); });
+</script>
+</body>
+</html>
