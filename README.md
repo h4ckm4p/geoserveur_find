@@ -15,8 +15,12 @@ Remonte les endpoints de geoserveur (ArcGIS REST, WMS, WFS, WMTS, WCS...) exploi
 ## Formats de geoserveur détectés
 
 - **Esri REST** : MapServer, FeatureServer, ImageServer, SceneServer, VectorTileServer, GeocodeServer
-- **OGC** : WMS, WFS, WMTS, WCS — via un chemin explicite (`/wms`, `/geoserver/...`, `/ows`...), via `?service=WMS|WFS|WMTS|WCS` en query string, ou via un endpoint CGI/FastCGI type `mapserv.fcgi`/`qgis_mapserv.fcgi`
+- **OGC (ancienne génération)** : WMS, WFS, WMTS, WCS — via un chemin explicite (`/wms`, `/geoserver/...`, `/ows`...), via `?service=WMS|WFS|WMTS|WCS` en query string, ou via un endpoint CGI/FastCGI type `mapserv.fcgi`/`qgis_mapserv.fcgi` (avec ou sans extension, ex. `/cgi-bin/mapserv`)
+- **OGC API (nouvelle génération, REST/JSON)** : endpoints `.../collections/<id>/items`, `.../ogc/features`, `.../wfs3`
+- **Fichiers géo directement liés** : GeoPackage (`.gpkg`), KML/KMZ, GeoJSON, tuiles vectorielles (`.pbf`) — exploitables tels quels dans QGIS, sans service à interroger
 - **Chemins relatifs** : une config qui référence son service par un chemin sans domaine (ex. `"geocodeService": "/arcgis/rest/services/.../GeocodeServer"`, fréquent quand l'app et son ArcGIS Server/GeoServer partagent la même origine) est aussi détectée, en mode texte brut comme en mode ArcGIS/Ma Carte IGN. En mode fetch direct, ces chemins sont automatiquement résolus en URL absolue puisque l'origine de la page est connue ; en mode texte brut, l'origine n'est pas connue donc le chemin est affiché tel quel avec une note "à préfixer avec le domaine de l'app/API"
+
+Chaque service trouvé est étiqueté par type (colonne "Type" du tableau de résultats) pour identifier immédiatement ce qu'on a en face.
 
 ## Usage
 
@@ -33,8 +37,9 @@ Entrées acceptées : URL `macarte.ign.fr/carte/<id>/...`, URL ArcGIS complète 
 ## Résultat
 
 - Une carte par item/projet traversé (titre, auteur/propriétaire, date, description)
-- Un tableau des services trouvés, avec le nombre de couches/tables détectées pour les services Esri consultables
+- Un tableau des services trouvés, avec leur type (Esri MapServer, WMS, GeoPackage...) et le nombre de couches/tables détectées pour les services Esri consultables
 - Un bouton "Copier" par ligne et un bouton "Copier tout" pour récupérer toutes les URLs d'un coup (à coller dans QGIS, un fichier de notes...)
+- Des boutons d'exemple (URL ArcGIS, URL Ma Carte IGN, extrait de texte) pour voir tout de suite ce que l'outil attend comme entrée, et un résumé "Comment ça marche ?" dépliable qui explique les 4 modes
 
 ## Limites connues
 

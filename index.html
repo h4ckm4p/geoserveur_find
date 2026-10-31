@@ -40,11 +40,26 @@
 <body>
 
 <h1>ArcGIS Layer Finder</h1>
-<p class="sub">Colle l'URL d'une application ArcGIS (Instant Apps, StoryMaps, Dashboards, webmap...), d'une carte Ma Carte IGN (macarte.ign.fr), ou directement un ID d'item ArcGIS : l'outil remonte la config et liste les services (MapServer / FeatureServer / WMS / WMTS / ...) exploitables dans QGIS. Pour toute autre URL, l'outil tente une récupération directe de la page (ça marche si le site autorise le CORS, sinon colle son code source ci-dessous).</p>
+<p class="sub">Colle l'URL d'une application ArcGIS (Instant Apps, StoryMaps, Dashboards, webmap...), d'une carte Ma Carte IGN (macarte.ign.fr), ou directement un ID d'item ArcGIS : l'outil remonte la config et liste les services (MapServer / FeatureServer / WMS / WMTS / OGC API / GeoPackage / ...) exploitables dans QGIS. Pour toute autre URL, l'outil tente une récupération directe de la page (ça marche si le site autorise le CORS, sinon colle son code source ci-dessous).</p>
+
+<details style="margin:0 0 1.2rem;color:var(--muted);font-size:.85rem">
+  <summary style="cursor:pointer;color:var(--accent)">Comment ça marche ? (4 modes, du plus auto au plus manuel)</summary>
+  <ol style="margin:.6rem 0 0;padding-left:1.2rem;line-height:1.7">
+    <li><b>ArcGIS</b> — URL d'app ArcGIS Online ou ID d'item : 100% automatique.</li>
+    <li><b>Ma Carte IGN</b> — URL macarte.ign.fr/carte/... : 100% automatique.</li>
+    <li><b>Fetch direct</b> — toute autre URL : tentative automatique, ne marche que si le site autorise le CORS (rare).</li>
+    <li><b>Texte brut</b> — colle le code source (Ctrl+U) ou des URLs copiées depuis l'onglet réseau du navigateur : marche toujours, mais c'est à toi de fournir le texte.</li>
+  </ol>
+</details>
 
 <div class="row">
   <input id="input" placeholder="https://xxx.maps.arcgis.com/apps/instant/media/index.html?appid=... ou https://macarte.ign.fr/carte/xxx/... (ou juste l'id ArcGIS)">
   <button id="go">Analyser</button>
+</div>
+<div class="row" style="margin-top:.5rem;flex-wrap:wrap;align-items:center">
+  <span style="color:var(--muted);font-size:.82rem">Exemples :</span>
+  <button type="button" class="copybtn examplebtn" data-url="https://capgeo.maps.arcgis.com/apps/instant/media/index.html?appid=59873b0b206e4aefae712dc2cdda200c">Atlas carrières Paris (ArcGIS)</button>
+  <button type="button" class="copybtn examplebtn" data-url="https://macarte.ign.fr/carte/mmwUmr/Alpes-rando">Alpes rando (Ma Carte IGN)</button>
 </div>
 <div id="status"></div>
 <div id="results"></div>
@@ -52,7 +67,10 @@
 <h1 style="margin-top:2.5rem">Autres geoserveurs (WMS / WFS / WMTS / GeoServer / QGIS Server...)</h1>
 <p class="sub">Pour un site qui n'est pas une app ArcGIS Online : colle le code source (Ctrl+U) ou un bundle JS de la page. Aucune requête réseau n'est faite, juste une extraction d'URLs par motif.</p>
 <textarea id="rawInput" rows="6" style="width:100%;background:var(--panel);border:1px solid var(--border);color:var(--text);padding:.6rem .8rem;border-radius:6px;font-size:.85rem;font-family:var(--mono)" placeholder="Colle ici le HTML / JS de la page..."></textarea>
-<div class="row" style="margin-top:.5rem"><button id="goText">Scanner le texte</button></div>
+<div class="row" style="margin-top:.5rem">
+  <button id="goText">Scanner le texte</button>
+  <button type="button" id="exampleTextBtn" class="copybtn">Voir un exemple</button>
+</div>
 <div id="statusText"></div>
 <div id="resultsText"></div>
 
@@ -62,16 +80,47 @@ const SERVICE_RE = /^https?:\/\/.+\/(MapServer|FeatureServer|ImageServer|SceneSe
 const OGC_PATH_RE = /^https?:\/\/[^\s"'<>]+\/(geoserver|qgisserver|ows|wms|wfs|wmts|wcs)(\/[^\s"'<>]*)?(\?[^\s"'<>]*)?$/i;
 const MAPSERV_CGI_RE = /^https?:\/\/[^\s"'<>]+\/[^\s"'<>\/?]*mapserv[^\s"'<>\/?]*(\.(fcgi|cgi))?(\?[^\s"'<>]*)?$/i;
 const OGC_QUERY_RE = /^https?:\/\/[^\s"'<>]+[?&]service=(wms|wfs|wmts|wcs)\b/i;
+// OGC API (nouvelle génération, REST/JSON) : endpoint de données .../collections/<id>/items, ou racine .../ogc/features, .../wfs3
+const OGCAPI_ITEMS_RE = /^https?:\/\/[^\s"'<>]+\/collections\/[^\s"'<>\/?]+\/items(\/[^\s"'<>]*)?(\?[^\s"'<>]*)?$/i;
+const OGCAPI_ROOT_RE = /^https?:\/\/[^\s"'<>]+\/(ogc\/features|ogcapi|wfs3)(\/[^\s"'<>]*)?(\?[^\s"'<>]*)?$/i;
+// fichiers géo directement liés (pas un service interrogeable, mais exploitable tel quel dans QGIS)
+const GEOFILE_RE = /^https?:\/\/[^\s"'<>]+\.(gpkg|kml|kmz|geojson)(\?[^\s"'<>]*)?$/i;
+// tuiles vectorielles génériques (protomaps/MVT), hors VectorTileServer Esri déjà couvert plus haut
+const VECTORTILE_RE = /^https?:\/\/[^\s"'<>]+\.pbf(\?[^\s"'<>]*)?$/i;
 // même chose mais sans schéma/domaine, pour les configs qui référencent le service en chemin relatif (même origine)
 const SERVICE_PATH_RE = /^\/(?:[^\s"'<>]*\/)?(MapServer|FeatureServer|ImageServer|SceneServer|VectorTileServer|GeocodeServer)(\/[A-Za-z0-9_]+)?\/?(\?[^\s"'<>]*)?$/i;
 const OGC_RELPATH_RE = /^\/(?:[^\s"'<>]*\/)?(geoserver|qgisserver|ows|wms|wfs|wmts|wcs)(\/[^\s"'<>]*)?(\?[^\s"'<>]*)?$/i;
 const REF_KEYS = ['webmap','webscene','itemId','mapId'];
 
 function isServiceUrl(s){
-  return SERVICE_RE.test(s) || OGC_PATH_RE.test(s) || MAPSERV_CGI_RE.test(s) || OGC_QUERY_RE.test(s);
+  return SERVICE_RE.test(s) || OGC_PATH_RE.test(s) || MAPSERV_CGI_RE.test(s) || OGC_QUERY_RE.test(s)
+    || OGCAPI_ITEMS_RE.test(s) || OGCAPI_ROOT_RE.test(s) || GEOFILE_RE.test(s) || VECTORTILE_RE.test(s);
 }
 function isServicePath(s){
   return SERVICE_PATH_RE.test(s) || OGC_RELPATH_RE.test(s);
+}
+
+function classifyService(url){
+  if(/MapServer/i.test(url)) return 'Esri MapServer';
+  if(/FeatureServer/i.test(url)) return 'Esri FeatureServer';
+  if(/ImageServer/i.test(url)) return 'Esri ImageServer';
+  if(/SceneServer/i.test(url)) return 'Esri SceneServer';
+  if(/VectorTileServer/i.test(url)) return 'Esri VectorTile';
+  if(/GeocodeServer/i.test(url)) return 'Esri Geocode';
+  if(OGCAPI_ITEMS_RE.test(url) || OGCAPI_ROOT_RE.test(url)) return 'OGC API';
+  if(/\.gpkg(\?|$)/i.test(url)) return 'GeoPackage';
+  if(/\.(kml|kmz)(\?|$)/i.test(url)) return 'KML';
+  if(/\.geojson(\?|$)/i.test(url)) return 'GeoJSON';
+  if(/\.pbf(\?|$)/i.test(url)) return 'Tuiles vectorielles';
+  if(/geoserver/i.test(url)) return 'GeoServer (WMS/WFS)';
+  if(/[?&]service=wms\b|\/wms(\/|\?|$)/i.test(url)) return 'WMS';
+  if(/[?&]service=wfs\b|\/wfs(\/|\?|$)/i.test(url)) return 'WFS';
+  if(/[?&]service=wmts\b|\/wmts(\/|\?|$)/i.test(url)) return 'WMTS';
+  if(/[?&]service=wcs\b|\/wcs(\/|\?|$)/i.test(url)) return 'WCS';
+  if(/qgisserver/i.test(url)) return 'QGIS Server';
+  if(MAPSERV_CGI_RE.test(url)) return 'MapServer CGI';
+  if(/\/ows(\/|\?|$)/i.test(url)) return 'OGC (ows)';
+  return 'Service';
 }
 
 const statusEl = document.getElementById('status');
@@ -235,10 +284,11 @@ function renderServiceTable(found, container){
   container.appendChild(copyAllBtn);
 
   const table = document.createElement('table');
-  table.innerHTML = `<thead><tr><th>Service</th><th>Détails</th><th></th></tr></thead>`;
+  table.innerHTML = `<thead><tr><th>Type</th><th>Service</th><th>Détails</th><th></th></tr></thead>`;
   const tbody = document.createElement('tbody');
   for(const url of found){
     const tr = document.createElement('tr');
+    const tdType = document.createElement('td');
     const tdUrl = document.createElement('td');
     const tdInfo = document.createElement('td');
     const tdCopy = document.createElement('td');
@@ -247,19 +297,25 @@ function renderServiceTable(found, container){
     btn.onclick = () => navigator.clipboard.writeText(url);
     tdCopy.appendChild(btn);
 
+    const type = classifyService(url);
+    tdType.innerHTML = `<span class="tag">${type}</span>`;
+
     if(url.startsWith('/')){
       tdUrl.innerHTML = `<code>${url}</code>`;
       tdInfo.innerHTML = '<span class="tag">chemin relatif — à préfixer avec le domaine de l\'app/API</span>';
-    } else {
+    } else if(type.startsWith('Esri')){
       tdUrl.innerHTML = `<a class="url" href="${url}?f=json" target="_blank">${url}</a>`;
       tdInfo.textContent = 'chargement...';
       describeService(url).then(d => {
-        if(!d){ tdInfo.innerHTML = '<span class="tag">non consultable (CORS/privé/non-Esri)</span>'; return; }
+        if(!d){ tdInfo.innerHTML = '<span class="tag">non consultable (CORS/privé)</span>'; return; }
         tdInfo.innerHTML = (d.layers.length ? `${d.layers.length} couche(s): ${d.layers.slice(0,6).join(', ')}${d.layers.length>6?'…':''}` : (d.serviceDescription || '—'));
       });
+    } else {
+      tdUrl.innerHTML = `<a class="url" href="${url}" target="_blank">${url}</a>`;
+      tdInfo.innerHTML = '<span class="tag">non introspecté — ouvrir/importer directement dans QGIS</span>';
     }
 
-    tr.append(tdUrl, tdInfo, tdCopy);
+    tr.append(tdType, tdUrl, tdInfo, tdCopy);
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);
@@ -274,23 +330,24 @@ async function run(){
   const directUrl = (!macarteId && !arcgisId && /^https?:\/\//i.test(raw.trim())) ? raw.trim() : null;
   if(!macarteId && !arcgisId && !directUrl){ setStatus("Impossible de reconnaître une app ArcGIS, Ma Carte IGN, ou une URL valide dans ce que tu as collé.", true); return; }
 
+  const mode = macarteId ? 'Ma Carte IGN' : arcgisId ? 'ArcGIS' : 'Fetch direct';
   goBtn.disabled = true;
-  setStatus('Analyse en cours...');
+  setStatus(`[${mode}] Analyse en cours...`);
   const found = new Set();
   try{
     if(macarteId) await analyzeMacarte(macarteId, found);
     else if(arcgisId) await analyze(arcgisId, 0, new Set(), found);
     else await analyzeDirectFetch(directUrl, found);
   }catch(e){
-    setStatus('Erreur: ' + e.message, true);
+    setStatus(`[${mode}] Erreur: ` + e.message, true);
     goBtn.disabled = false;
     return;
   }
 
   if(found.size === 0){
-    setStatus('Aucun service trouvé dans la config de cet item.', true);
+    setStatus(`[${mode}] Aucun service trouvé dans la config de cet item.`, true);
   } else {
-    setStatus(`${found.size} service(s) trouvé(s).`);
+    setStatus(`[${mode}] ${found.size} service(s) trouvé(s).`);
     renderServiceTable(found, resultsEl);
   }
   goBtn.disabled = false;
@@ -331,6 +388,19 @@ function runText(){
 goBtn.addEventListener('click', run);
 document.getElementById('input').addEventListener('keydown', e => { if(e.key === 'Enter') run(); });
 document.getElementById('goText').addEventListener('click', runText);
+
+document.querySelectorAll('.examplebtn[data-url]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.getElementById('input').value = btn.dataset.url;
+    run();
+  });
+});
+document.getElementById('exampleTextBtn').addEventListener('click', () => {
+  document.getElementById('rawInput').value =
+    "var layerGris = L.tileLayer.wms('https://carto2.geo-ide.din.developpement-durable.gouv.fr/rest-api/ows/90d2f197-fc9e-4ef7-9833-c87703a115d5', {layers: 'N_DFCI_DEBROUSS_ZINF_S_030', format: 'image/png'});\n" +
+    "var wfs = 'https://couverture-mobile.orange.fr/geoserver/wfs?service=WFS&version=2.0.0&request=GetFeature&typeNames=Arcane:pic_met_5g';";
+  runText();
+});
 </script>
 </body>
 </html>
